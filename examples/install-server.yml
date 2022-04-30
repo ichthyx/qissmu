@@ -1,0 +1,16 @@
+---
+- name: qissmu example
+  hosts: all
+  tasks:
+    - name: Update and upgrade apt packages
+      apt:
+        upgrade: yes
+        update_cache: yes
+      become: yes
+      become_user: root
+
+    - name: Install base package
+      apt:
+        name: ["htop", "tmux", "apt-transport-https", "acl"]
+      become: yes
+      become_user: root
