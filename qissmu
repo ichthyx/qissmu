@@ -1,37 +1,35 @@
 #!/bin/bash
 #########################################################################################
-# QISSMU (Codename: ANTIVAGRANT) v.0.9
-# Copyright Ichthyx 2021
+# QISSMU (Codename: ANTIVAGRANT) v.0.2
+# Copyright Ichthyx 2021 - 2023
 # License : GNU GPL V3
+#
 ##### Bash default for good behavior ####################################################
 set -o errexit # (exit if error)
+#
 # Color variables:
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 RESET='\033[0m'
 CACHEDIR=".qissmucache" # Cache directory
-#########################################################################################
+
+# Verify JQ
+if [ ! "$(which jq)" ]; then
+    echo -e "${RED}[!] jq not found please install it to run.${RESET}"
+    exit 1
+fi
+
 ##### Variables #########################################################################
-#########################################################################################
 # Default settings if empty
 if [[ -z "$CLOUD_IMAGE" && -z "$HASH" ]];
 then
-  CLOUD_IMAGE="https://cloud.debian.org/cdimage/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2"
-  HASH="https://cloud.debian.org/cdimage/cloud/bullseye/latest/SHA512SUMS"
+  DEFAULT_DISTRO="debian12"
+  CLOUD_IMAGE=$(jq -r --arg DEFAULT_DISTRO "$DEFAULT_DISTRO" '.[$DEFAULT_DISTRO]."CLOUD_IMAGE"' cloud-images.json)
+  HASH=$(jq -r --arg DEFAULT_DISTRO "$DEFAULT_DISTRO" '.[$DEFAULT_DISTRO]."HASH"' cloud-images.json)
 fi
-### NOTES:
-### - links to cloud images:
-###   Ubuntu http://cloud-images.ubuntu.com/
-###   CentOS: http://cloud.centos.org/centos/7/images/
-###   Fedora: https://alt.fedoraproject.org/cloud/
-###   Flatcar (CoreOS fork): https://stable.release.flatcar-linux.net/amd64-usr/current/
-###   Gentoo: http://gentoo.osuosl.org/experimental/amd64/openstack
-###   Arch (also Gentoo): https://linuximages.de/openstack/arch/
-###   Alpine: https://github.com/chriswayg/packer-qemu-cloud/
-###   RockyLinux https://download.rockylinux.org/pub/rocky/8.4/images/
 
 # DEFAULT VM Variables:
-if [[ -z "$VM_USER_NAME" ]]; then VM_USER_NAME="testuser"; fi
+if [[ -z "$VM_USER_NAME" ]]; then VM_USER_NAME="dev"; fi
 if [[ -z "$VM_USER_PASSWORD" ]]; then VM_USER_PASSWORD="1234"; fi
 if [[ -z "$VM_ROOT_PASSWORD" ]]; then VM_ROOT_PASSWORD=VM_USER_PASSWORD; fi
 if [[ -z "$VM_MEMORY_SIZE" ]]; then VM_MEMORY_SIZE="4096"; fi
@@ -39,9 +37,9 @@ if [[ -z "$NETWORK_BRIDGE" ]]; then NETWORK_BRIDGE="br0"; fi
 # NOTE : NETWORK_USERMODE_PORTREDIR=(tcp::5432-:5432 tcp::443-:443 tcp::2222-:22 udp::53-:53)
 if [[ -z "$NETWORK_USERMODE_PORTREDIR" ]]; then NETWORK_USERMODE_PORTREDIR=(tcp::2222-:22); fi
 if [[ -z "$HOST_CPU_CORES" ]]; then HOST_CPU_CORES=$(nproc --all); fi
-if [[ -z "$QCOW_FILE" ]]; then QCOW_FILE=$(echo $CLOUD_IMAGE | awk -F '/' '{print $NF}'); fi
+if [[ -z "$QCOW_FILE" ]]; then QCOW_FILE=$(echo "$CLOUD_IMAGE" | awk -F '/' '{print $NF}'); fi
+if [[ -z "$RESIZE" ]]; then RESIZE="5G"; fi
 # Custom settings:
-# RESIZE="4G"
 # BTRFS_NOCOW=1
 # TODO: SSH_KEY=""
 # TODO: QEMU_CUST_ARGS=""
@@ -53,19 +51,26 @@ if [[ -z "$QCOW_FILE" ]]; then QCOW_FILE=$(echo $CLOUD_IMAGE | awk -F '/' '{prin
 # TODO: better -help
 while [ $# -gt 0 ]; do
   case "$1" in
-    -bridge|-b)
+    --bridge|-b)
       USE_BRIDGE=1;;
-    -clean*|-c*)
+    --clear|-c)
       CLEAN=1;;
-    -fastpls|-f)
+    --distro|-d)
       if [[ "$1" != *=* ]]; then shift; fi # Value is next arg if no `=`
-      FASTPLS="${1#*=}"
+      QUICK="${1#*=}"
       ;;
-    -help|-h)
-      echo "qissmu - [version 0.9]"
-      echo "-bridge           use bridge"
-      echo "-clean            delete cache folder" 
-      echo "-fastpls debian   quickly dl and boot a debian image"
+    --poweroff|-pw)
+      POWEROFF=true
+      ;;
+    --status|-s)
+      STATUS=true
+      ;;
+    --help|-h)
+      echo "qissmu - [version 0.2]"
+      echo "--bridge|-b            use bridge"
+      echo "--clear|-c             delete cache folder"
+      echo "--distro|-d debian     quickly dl and boot a debian image"
+      echo "--poweroff|-pw         try to shutdown the vm with qemu-guest-agent"
       exit 0
       ;;
     *)
@@ -78,14 +83,13 @@ done
 
 
 #########################################################################################
-# From now every step is a function just for better readability.
+# every step is a function for better readability.
 #########################################################################################$
 
 
 function check_dep() {
   # Archlinux : pacman -S wget qemu libisoburn openbsd-netcat bridge-utils
   # Debian : apt install wget qemu libisoburn1 netcat-openbsd bridge-utils
-  # RHEL/CentOS : TODO
   if [ ! "$(which wget)" ]; then
       echo -e "${RED}[!] wget not found please install it to run.${RESET}"
       exit 1
@@ -106,25 +110,20 @@ function check_dep() {
 
 
 function quickboot() {
-  # TODO: replace /date/ with $date
-  if [[ -n "$FASTPLS" && "$FASTPLS" == "debian" ]]; 
+  if [[ -n "$QUICK" ]]; 
   then
-    CLOUD_IMAGE="https://cloud.debian.org/cdimage/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2"
-    HASH="https://cloud.debian.org/cdimage/cloud/bullseye/latest/SHA512SUMS"
-  elif [[ -n "$FASTPLS" && "$FASTPLS" == "rockylinux" ]]; 
-  then
-    CLOUD_IMAGE="https://download.rockylinux.org/pub/rocky/8.4/images/Rocky-8-GenericCloud-8.4-20210620.0.x86_64.qcow2"
-    HASH="https://download.rockylinux.org/pub/rocky/8.4/images/CHECKSUM"
-  elif [[ -n "$FASTPLS" && "$FASTPLS" == "archlinux" ]];
-  then
-    CLOUD_IMAGE="https://mirror.init7.net/archlinux/images/latest/Arch-Linux-x86_64-cloudimg-20211001.0.qcow2"
-    HASH="https://mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg-20211001.0.qcow2.SHA256"  
+    CLOUD_IMAGE=$(jq -r --arg DISTRO "$QUICK" '.[$DISTRO]."CLOUD_IMAGE"' cloud-images.json)
+    HASH=$(jq -r --arg DISTRO "$QUICK" '.[$DISTRO]."HASH"' cloud-images.json)
+    if [ "$CLOUD_IMAGE" = "null" ] || [ "$HASH" = "null" ]; 
+    then
+      echo -e "${RED}[!] Image not found.${RESET}"
+      exit 1
+    fi
   fi
 }
 
 
 function clear_cache() {
-  # TODO: don't dl everytime when clear
   if [[ -n "$CLEAN" ]];
   then
       rm -rfv "${CACHEDIR}"
@@ -136,24 +135,24 @@ function clear_cache() {
 function download_and_verify() {
   mkdir -p "${CACHEDIR}"
   mkdir -p "${CACHEDIR}/cloudinit"
-  echo -e "${GREEN}[?] Downloading image...${RESET}"
-  wget -nc $CLOUD_IMAGE -P "${CACHEDIR}"
+  echo -e "${GREEN}[i] Downloading image...${RESET}"
+  wget -nc "$CLOUD_IMAGE" -P "${CACHEDIR}"
   #TODO: 
   #wget -nc $HASH -O "${CACHEDIR}/CHECKSUM"
   #wget with -nc and -O exit 1 if already exist
-  curl -L $HASH -o "${CACHEDIR}/CHECKSUM"
+  curl -L "$HASH" -o "${CACHEDIR}/CHECKSUM"
   IMG_ALREADY_USED="${CACHEDIR}/IMG_ALREADY_USED"
   if ! test -f "$IMG_ALREADY_USED"; then
-    echo -e "${GREEN}[?] Checking CHECKSUM...${RESET}"
+    echo -e "${GREEN}[i] Checking CHECKSUM...${RESET}"
     cd "${CACHEDIR}"
     shasum -c CHECKSUM 2> /dev/null | grep "$QCOW_FILE"
-    echo -e "${GREEN}[?] Checksum: OK${RESET}"
+    echo -e "${GREEN}[i] Checksum: OK${RESET}"
     cd ..
 
     # Resize if needed
     if [[ -n "$RESIZE" ]];
     then
-        echo -e "${GREEN}[?] Resizing QCOW...${RESET}"
+        echo -e "${GREEN}[i] Resizing QCOW...${RESET}"
         qemu-img resize "${CACHEDIR}/${QCOW_FILE}" +"${RESIZE}"
     fi
 
@@ -167,16 +166,8 @@ function download_and_verify() {
 
 
 function generate_cloudinit_iso {
-##### Installing qemu-guest-agent #######################################################
-# TODO: doesn't work anymore ?
-# TODO: Libguest ? ==> apt install --no-install-recommends --no-install-suggests libguestfs-tools -y 
-# and now guestfs-tools
-##### Install qemu-guest-agent #####
-# echo -e "${GREEN}[?] Installing qemu-guest-agent in image...${RESET}"
-# virt-customize --install qemu-guest-agent --run-command "systemctl enable qemu-guest-agent" -a "${CACHEDIR}/${QCOW_FILE}"
-#########################################################################################
   if ! test -f "$IMG_ALREADY_USED"; then
-    echo -e "${GREEN}[?] Generating cloud-init iso...${RESET}"
+    echo -e "${GREEN}[i] Generating cloud-init iso...${RESET}"
     cat > "${CACHEDIR}/cloudinit/user-data"<< EOF
 #cloud-config
 # vim: syntax=yaml
@@ -228,7 +219,7 @@ function initialize_network {
       if ! ip -c a | grep -q tap;
       then
           # create tap device and add in to bridge $NETWORK_BRIDGE
-          echo -e "${GREEN}[?] Asking sudo for creating tap device... ${RESET}"
+          echo -e "${GREEN}[i] Asking sudo for creating tap device... ${RESET}"
           sudo ip tuntap add dev tap0 mode tap
           sudo ip link set tap0 up promisc on
           sudo brctl addif "${NETWORK_BRIDGE}" tap0
@@ -248,7 +239,7 @@ function initialize_network {
 
 function launch_qemu {
   #TODO: display optional
-  echo -e "${GREEN}[?] Launching QEMU...${RESET}"
+  echo -e "${GREEN}[i] Launching QEMU...${RESET}"
   qemu-system-x86_64 -enable-kvm \
   -cpu host \
   -smp "${HOST_CPU_CORES}" \
@@ -269,26 +260,56 @@ function launch_qemu {
 function get_ip {
   if [[ -n "$USE_BRIDGE" ]];
   then
-    echo -e "${GREEN}[?] Waiting for VM to start...${RESET}"
+    echo -e "${GREEN}[i] Waiting for VM to start...${RESET}"
 
-    # we wait qmp answer
+    # we wait for qmp to answer
     while [[ $(echo '{"execute":"guest-sync", "arguments":{"id": 1234}}' | timeout 1 nc -U "${CACHEDIR}/qga.sock") != '{"return": 1234}' ]]
     do
       sleep 1
     done
 
-    echo -e "${GREEN}[?] VM started asking ip${RESET}"
+    echo -e "${GREEN}[i] VM started asking ip${RESET}"
 
     QISSMU_IP_ADDR=$(echo '{"execute": "guest-network-get-interfaces"}' | timeout 1 nc -U "${CACHEDIR}/qga.sock" | jq '.return[1]."ip-addresses"[0]."ip-address"' | sed 's/"//g')
 
-    echo -e "${GREEN}[?] IP ADDRESS of VM is : ${QISSMU_IP_ADDR}${RESET}"
+    echo -e "${GREEN}[i] IP ADDRESS of VM is : ${QISSMU_IP_ADDR}${RESET}"
   else
     QISSMU_IP_ADDR="127.0.0.1:${NETWORK_USERMODE_SSHPORT}"
   fi
 }
 
+function poweroff {
+  if [[ -n "$POWEROFF" ]];
+  then
+    while [[ $(echo '{"execute":"guest-sync", "arguments":{"id": 1234}}' | timeout 1 nc -U "${CACHEDIR}/qga.sock") != '{"return": 1234}' ]]
+    do
+      sleep 1
+    done
+    echo '{"execute": "guest-shutdown"}' | timeout 1 nc -U "${CACHEDIR}/qga.sock"
+    echo -e "${GREEN}[i] shutdown signal sended to vm...${RESET}"
+    exit 0
+  fi
+}
+
+function status {
+  if [[ -n "$STATUS" ]];
+  then
+    while [[ $(echo '{"execute":"guest-sync", "arguments":{"id": 1234}}' | timeout 1 nc -U "${CACHEDIR}/qga.sock") != '{"return": 1234}' ]]
+    do
+      sleep 1
+    done
+    
+    QISSMU_IP_ADDR=$(echo '{"execute": "guest-network-get-interfaces"}' | timeout 1 nc -U "${CACHEDIR}/qga.sock" | jq '.return[1]."ip-addresses"[0]."ip-address"' | sed 's/"//g')
+
+    echo -e "${GREEN}[i] VM is running and IP-ADDRESS is : ${QISSMU_IP_ADDR}${RESET}"
+    exit 0
+  fi
+}
+
 # MAIN :
 check_dep
+status
+poweroff
 quickboot
 clear_cache
 download_and_verify
